@@ -131,11 +131,51 @@ class AsyncPostgresSaver(BasePostgresSaver):
             An asynchronous iterator of matching checkpoint tuples.
         """
         where, args = self._search_where(config, filter, before)
-        query = self.SELECT_SQL + where + " ORDER BY checkpoint_id DESC"
         params = list(args)
         if limit is not None:
-            query += " LIMIT %s"
+            query = (
+                "WITH recent AS (\n"
+                "  SELECT thread_id, checkpoint, checkpoint_ns, checkpoint_id, "
+                "parent_checkpoint_id, metadata\n"
+                "  FROM checkpoints\n"
+                f"  {where}\n"
+                "  ORDER BY checkpoint_id DESC\n"
+                "  LIMIT %s\n"
+                ")\n"
+                "SELECT\n"
+                "  r.thread_id,\n"
+                "  r.checkpoint,\n"
+                "  r.checkpoint_ns,\n"
+                "  r.checkpoint_id,\n"
+                "  r.parent_checkpoint_id,\n"
+                "  r.metadata,\n"
+                "  cv.channel_values,\n"
+                "  pw.pending_writes\n"
+                "FROM recent r\n"
+                "LEFT JOIN LATERAL (\n"
+                "  SELECT array_agg(array[bl.channel::bytea, bl.type::bytea, bl.blob]) AS channel_values\n"
+                "  FROM jsonb_each_text(r.checkpoint -> 'channel_versions')\n"
+                "  INNER JOIN checkpoint_blobs bl\n"
+                "    ON bl.thread_id = r.thread_id\n"
+                "   AND bl.checkpoint_ns = r.checkpoint_ns\n"
+                "   AND bl.channel = jsonb_each_text.key\n"
+                "   AND bl.version = jsonb_each_text.value\n"
+                ") cv ON TRUE\n"
+                "LEFT JOIN LATERAL (\n"
+                "  SELECT array_agg(\n"
+                "    array[cw.task_id::text::bytea, cw.channel::bytea, cw.type::bytea, cw.blob]\n"
+                "    ORDER BY cw.task_id, cw.idx\n"
+                "  ) AS pending_writes\n"
+                "  FROM checkpoint_writes cw\n"
+                "  WHERE cw.thread_id = r.thread_id\n"
+                "    AND cw.checkpoint_ns = r.checkpoint_ns\n"
+                "    AND cw.checkpoint_id = r.checkpoint_id\n"
+                ") pw ON TRUE\n"
+                "ORDER BY r.checkpoint_id DESC"
+            )
             params.append(int(limit))
+        else:
+            query = self.SELECT_SQL + where + " ORDER BY checkpoint_id DESC"
         # if we change this to use .stream() we need to make sure to close the cursor
         async with self._cursor() as cur:
             await cur.execute(query, params, binary=True)
