@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 import random
 import warnings
 from collections.abc import Sequence
@@ -223,18 +222,6 @@ INSERT_CHECKPOINT_WRITES_SQL = """
 """
 
 
-def _qualify_where(where: str, alias: str = "c") -> str:
-    """Prefix column names in a WHERE clause with table alias for use in CTEs.
-
-    Returns 'WHERE TRUE' when where is empty.
-    """
-    if not where or not where.strip():
-        return "WHERE TRUE"
-    for col in ("thread_id", "checkpoint_ns", "checkpoint_id", "metadata"):
-        where = re.sub(rf"\b{re.escape(col)}\b", f"{alias}.{col}", where)
-    return where
-
-
 def _pending_writes_where(config: RunnableConfig | None) -> str:
     """Return WHERE predicate for pending_writes CTE (no WHERE keyword)."""
     if not config:
@@ -384,6 +371,7 @@ class BasePostgresSaver(BaseCheckpointSaver[str]):
         config: RunnableConfig | None,
         filter: MetadataInput,
         before: RunnableConfig | None = None,
+        alias: str | None = None,
     ) -> tuple[str, list[Any]]:
         """Return WHERE clause predicates for alist() given config, filter, before.
 
@@ -395,27 +383,29 @@ class BasePostgresSaver(BaseCheckpointSaver[str]):
         wheres = []
         param_values = []
 
+        prefix = f"{alias}." if alias else ""
+
         # construct predicate for config filter
         if config:
-            wheres.append("thread_id = %s ")
+            wheres.append(f"{prefix}thread_id = %s ")
             param_values.append(config["configurable"]["thread_id"])
             checkpoint_ns = config["configurable"].get("checkpoint_ns")
             if checkpoint_ns is not None:
-                wheres.append("checkpoint_ns = %s")
+                wheres.append(f"{prefix}checkpoint_ns = %s")
                 param_values.append(checkpoint_ns)
 
             if checkpoint_id := get_checkpoint_id(config):
-                wheres.append("checkpoint_id = %s ")
+                wheres.append(f"{prefix}checkpoint_id = %s ")
                 param_values.append(checkpoint_id)
 
         # construct predicate for metadata filter
         if filter:
-            wheres.append("metadata @> %s ")
+            wheres.append(f"{prefix}metadata @> %s ")
             param_values.append(Jsonb(filter))
 
         # construct predicate for `before`
         if before is not None:
-            wheres.append("checkpoint_id < %s ")
+            wheres.append(f"{prefix}checkpoint_id < %s ")
             param_values.append(get_checkpoint_id(before))
 
         return (
@@ -431,8 +421,7 @@ class BasePostgresSaver(BaseCheckpointSaver[str]):
         limit: int | None,
     ) -> tuple[str, list[Any]]:
         """Build the optimized CTE list query and params."""
-        where, args = self._search_where(config, filter, before)
-        where_qualified = _qualify_where(where)
+        where_qualified, args = self._search_where(config, filter, before, alias="c")
         pending_where = _pending_writes_where(config)
         order_limit = "ORDER BY c.checkpoint_id DESC"
         if limit is not None:
