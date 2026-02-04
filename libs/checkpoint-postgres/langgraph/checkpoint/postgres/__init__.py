@@ -141,13 +141,7 @@ class PostgresSaver(BasePostgresSaver):
             >>> print(checkpoints)
             [CheckpointTuple(...), ...]
         """
-        where, args = self._search_where(config, filter, before)
-        query = self.SELECT_SQL + where + " ORDER BY checkpoint_id DESC"
-        params = list(args)
-        if limit is not None:
-            query += " LIMIT %s"
-            params.append(int(limit))
-        # if we change this to use .stream() we need to make sure to close the cursor
+        query, params = self._build_list_query(config, filter, before, limit)
         with self._cursor() as cur:
             cur.execute(query, params)
             values = cur.fetchall()
@@ -217,18 +211,10 @@ class PostgresSaver(BasePostgresSaver):
             CheckpointTuple(...)
         """  # noqa
         thread_id = config["configurable"]["thread_id"]
-        checkpoint_id = get_checkpoint_id(config)
-        checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
-        if checkpoint_id:
-            args: tuple[Any, ...] = (thread_id, checkpoint_ns, checkpoint_id)
-            where = "WHERE thread_id = %s AND checkpoint_ns = %s AND checkpoint_id = %s"
-        else:
-            args = (thread_id, checkpoint_ns)
-            where = "WHERE thread_id = %s AND checkpoint_ns = %s ORDER BY checkpoint_id DESC LIMIT 1"
-
+        query, args = self._build_get_tuple_query(config)
         with self._cursor() as cur:
             cur.execute(
-                self.SELECT_SQL + where,
+                query,
                 args,
             )
             value = cur.fetchone()

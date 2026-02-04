@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import random
 import warnings
 from collections.abc import Sequence
@@ -111,6 +112,75 @@ select
     ) as pending_writes
 from checkpoints """
 
+# Optimized list/get query using CTEs to avoid correlated subqueries per row.
+# Same result as SELECT_SQL but fetches channel_values and pending_writes via
+# bulk JOINs instead of one subquery per checkpoint row.
+SELECT_LIST_CTE_SQL = """
+WITH checkpoint_data AS (
+  SELECT
+    c.thread_id,
+    c.checkpoint,
+    c.checkpoint_ns,
+    c.checkpoint_id,
+    c.parent_checkpoint_id,
+    c.metadata,
+    kv.key AS channel_key,
+    kv.value AS channel_version
+  FROM checkpoints c
+  LEFT JOIN LATERAL jsonb_each_text(
+    COALESCE(c.checkpoint -> 'channel_versions', '{}'::jsonb)
+  ) AS kv ON true
+  {where_checkpoint}
+),
+channel_values AS (
+  SELECT
+    cd.thread_id,
+    cd.checkpoint_id,
+    cd.checkpoint_ns,
+    array_agg(array[bl.channel::bytea, bl.type::bytea, bl.blob]) AS channel_value
+  FROM checkpoint_data cd
+  INNER JOIN checkpoint_blobs bl
+  ON bl.thread_id = cd.thread_id
+    AND bl.checkpoint_ns = cd.checkpoint_ns
+    AND bl.channel = cd.channel_key
+    AND bl.version = cd.channel_version
+  GROUP BY cd.thread_id, cd.checkpoint_id, cd.checkpoint_ns
+),
+pending_writes AS (
+  SELECT
+    cw.thread_id,
+    cw.checkpoint_ns,
+    cw.checkpoint_id,
+    array_agg(
+      array[cw.task_id::text::bytea, cw.channel::bytea, cw.type::bytea, cw.blob]
+      ORDER BY cw.task_id, cw.idx
+    ) AS pending_write
+  FROM checkpoint_writes cw
+  WHERE {where_pending}
+  GROUP BY cw.thread_id, cw.checkpoint_ns, cw.checkpoint_id
+)
+SELECT
+  c.thread_id,
+  c.checkpoint,
+  c.checkpoint_ns,
+  c.checkpoint_id,
+  c.parent_checkpoint_id,
+  c.metadata,
+  cv.channel_value AS channel_values,
+  pw.pending_write AS pending_writes
+FROM checkpoints c
+LEFT JOIN channel_values cv
+ON c.thread_id = cv.thread_id
+  AND c.checkpoint_id = cv.checkpoint_id
+  AND c.checkpoint_ns = cv.checkpoint_ns
+LEFT JOIN pending_writes pw
+ON c.thread_id = pw.thread_id
+  AND c.checkpoint_id = pw.checkpoint_id
+  AND c.checkpoint_ns = pw.checkpoint_ns
+WHERE {where_final}
+{order_limit}
+"""
+
 SELECT_PENDING_SENDS_SQL = f"""
 select
     checkpoint_id,
@@ -153,8 +223,37 @@ INSERT_CHECKPOINT_WRITES_SQL = """
 """
 
 
+def _qualify_where(where: str, alias: str = "c") -> str:
+    """Prefix column names in a WHERE clause with table alias for use in CTEs.
+
+    Returns 'WHERE TRUE' when where is empty.
+    """
+    if not where or not where.strip():
+        return "WHERE TRUE"
+    for col in ("thread_id", "checkpoint_ns", "checkpoint_id", "metadata"):
+        where = re.sub(rf"\b{re.escape(col)}\b", f"{alias}.{col}", where)
+    return where
+
+
+def _pending_writes_where(config: RunnableConfig | None) -> str:
+    """Return WHERE predicate for pending_writes CTE (no WHERE keyword).
+
+    Uses same %s placeholders as _search_where's first 1–2 params (thread_id, checkpoint_ns).
+    """
+    if not config:
+        return "TRUE"
+    tid = config["configurable"].get("thread_id")
+    if tid is None:
+        return "TRUE"
+    ns = config["configurable"].get("checkpoint_ns")
+    if ns is not None:
+        return "cw.thread_id = %s AND cw.checkpoint_ns = %s"
+    return "cw.thread_id = %s"
+
+
 class BasePostgresSaver(BaseCheckpointSaver[str]):
     SELECT_SQL = SELECT_SQL
+    SELECT_LIST_CTE_SQL = SELECT_LIST_CTE_SQL
     SELECT_PENDING_SENDS_SQL = SELECT_PENDING_SENDS_SQL
     MIGRATIONS = MIGRATIONS
     UPSERT_CHECKPOINT_BLOBS_SQL = UPSERT_CHECKPOINT_BLOBS_SQL
@@ -313,3 +412,50 @@ class BasePostgresSaver(BaseCheckpointSaver[str]):
             "WHERE " + " AND ".join(wheres) if wheres else "",
             param_values,
         )
+
+    def _build_list_query(
+        self,
+        config: RunnableConfig | None,
+        filter: MetadataInput,
+        before: RunnableConfig | None,
+        limit: int | None,
+    ) -> tuple[str, list[Any]]:
+        """Build the optimized CTE list query and params."""
+        where, args = self._search_where(config, filter, before)
+        where_qualified = _qualify_where(where)
+        pending_where = _pending_writes_where(config)
+        order_limit = "ORDER BY c.checkpoint_id DESC"
+        if limit is not None:
+            order_limit += " LIMIT %s"
+        query = self.SELECT_LIST_CTE_SQL.format(
+            where_checkpoint=where_qualified,
+            where_pending=pending_where,
+            where_final=where_qualified,
+            order_limit=order_limit,
+        )
+        params = list(args)
+        if limit is not None:
+            params.append(int(limit))
+        return query, params
+
+    def _build_get_tuple_query(self, config: RunnableConfig) -> tuple[str, tuple[Any, ...]]:
+        """Build the optimized CTE get_tuple query and params."""
+        thread_id = config["configurable"]["thread_id"]
+        checkpoint_id = get_checkpoint_id(config)
+        checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
+        if checkpoint_id:
+            args = (thread_id, checkpoint_ns, checkpoint_id)
+            where = "WHERE c.thread_id = %s AND c.checkpoint_ns = %s AND c.checkpoint_id = %s"
+            order_limit = "ORDER BY c.checkpoint_id DESC"
+        else:
+            args = (thread_id, checkpoint_ns)
+            where = "WHERE c.thread_id = %s AND c.checkpoint_ns = %s"
+            order_limit = "ORDER BY c.checkpoint_id DESC LIMIT 1"
+        pending_where = _pending_writes_where(config)
+        query = self.SELECT_LIST_CTE_SQL.format(
+            where_checkpoint=where,
+            where_pending=pending_where,
+            where_final=where,
+            order_limit=order_limit,
+        )
+        return query, args
