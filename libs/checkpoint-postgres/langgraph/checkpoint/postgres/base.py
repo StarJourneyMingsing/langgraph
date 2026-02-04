@@ -236,10 +236,7 @@ def _qualify_where(where: str, alias: str = "c") -> str:
 
 
 def _pending_writes_where(config: RunnableConfig | None) -> str:
-    """Return WHERE predicate for pending_writes CTE (no WHERE keyword).
-
-    Uses same %s placeholders as _search_where's first 1–2 params (thread_id, checkpoint_ns).
-    """
+    """Return WHERE predicate for pending_writes CTE (no WHERE keyword)."""
     if not config:
         return "TRUE"
     tid = config["configurable"].get("thread_id")
@@ -249,6 +246,19 @@ def _pending_writes_where(config: RunnableConfig | None) -> str:
     if ns is not None:
         return "cw.thread_id = %s AND cw.checkpoint_ns = %s"
     return "cw.thread_id = %s"
+
+
+def _pending_writes_params(config: RunnableConfig | None) -> list[Any]:
+    """Return params for pending_writes WHERE in correct order."""
+    if not config:
+        return []
+    tid = config["configurable"].get("thread_id")
+    if tid is None:
+        return []
+    ns = config["configurable"].get("checkpoint_ns")
+    if ns is not None:
+        return [tid, ns]
+    return [tid]
 
 
 class BasePostgresSaver(BaseCheckpointSaver[str]):
@@ -433,7 +443,8 @@ class BasePostgresSaver(BaseCheckpointSaver[str]):
             where_final=where_qualified,
             order_limit=order_limit,
         )
-        params = list(args)
+        pending_params = _pending_writes_params(config)
+        params = list(args) + pending_params + list(args)
         if limit is not None:
             params.append(int(limit))
         return query, params
@@ -458,4 +469,6 @@ class BasePostgresSaver(BaseCheckpointSaver[str]):
             where_final=where,
             order_limit=order_limit,
         )
-        return query, args
+        pending_params = _pending_writes_params(config)
+        params = tuple(list(args) + pending_params + list(args))
+        return query, params
