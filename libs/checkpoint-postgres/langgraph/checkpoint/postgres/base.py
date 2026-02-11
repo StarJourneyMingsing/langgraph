@@ -433,7 +433,15 @@ class BasePostgresSaver(BaseCheckpointSaver[str]):
             where_final=where_qualified,
             order_limit=order_limit,
         )
-        params = list(args)
+        # Params appear 3x in the query: where_checkpoint, where_pending, where_final.
+        # where_pending uses only the first 0–2 args (thread_id, optional checkpoint_ns).
+        args_list = list(args)
+        n_pending = (
+            0
+            if not config or config["configurable"].get("thread_id") is None
+            else (2 if config["configurable"].get("checkpoint_ns") is not None else 1)
+        )
+        params = args_list + args_list[:n_pending] + args_list
         if limit is not None:
             params.append(int(limit))
         return query, params
@@ -458,4 +466,7 @@ class BasePostgresSaver(BaseCheckpointSaver[str]):
             where_final=where,
             order_limit=order_limit,
         )
-        return query, args
+        # Params appear 3x: where_checkpoint, where_pending (first 2), where_final.
+        args_list = list(args)
+        params = tuple(args_list + args_list[:2] + args_list)
+        return query, params
