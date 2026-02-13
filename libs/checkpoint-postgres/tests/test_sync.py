@@ -211,6 +211,17 @@ def test_combined_metadata(saver_name: str, test_data) -> None:
 
 
 @pytest.mark.parametrize("saver_name", ["base", "pool", "pipe", "shallow"])
+def test_get_tuple_without_checkpoint_ns(saver_name: str, test_data) -> None:
+    with _saver(saver_name) as saver:
+        config = test_data["configs"][1]
+        saver.put(config, test_data["checkpoints"][1], test_data["metadata"][1], {})
+        checkpoint = saver.get_tuple({"configurable": {"thread_id": "thread-2"}})
+        assert checkpoint is not None
+        assert checkpoint.config["configurable"]["thread_id"] == "thread-2"
+        assert checkpoint.config["configurable"]["checkpoint_ns"] == ""
+
+
+@pytest.mark.parametrize("saver_name", ["base", "pool", "pipe", "shallow"])
 def test_search(saver_name: str, test_data) -> None:
     with _saver(saver_name) as saver:
         configs = test_data["configs"]
