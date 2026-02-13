@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import re
 import random
+import re
 import warnings
 from collections.abc import Sequence
 from importlib.metadata import version as get_version
@@ -128,7 +128,7 @@ WITH checkpoint_data AS (
     kv.value AS channel_version
   FROM checkpoints c
   LEFT JOIN LATERAL jsonb_each_text(
-    COALESCE(c.checkpoint -> 'channel_versions', '{}'::jsonb)
+    COALESCE(c.checkpoint -> 'channel_versions', '{{}}'::jsonb)
   ) AS kv ON true
   {where_checkpoint}
 ),
@@ -177,7 +177,7 @@ LEFT JOIN pending_writes pw
 ON c.thread_id = pw.thread_id
   AND c.checkpoint_id = pw.checkpoint_id
   AND c.checkpoint_ns = pw.checkpoint_ns
-WHERE {where_final}
+{where_final}
 {order_limit}
 """
 
@@ -446,13 +446,15 @@ class BasePostgresSaver(BaseCheckpointSaver[str]):
             params.append(int(limit))
         return query, params
 
-    def _build_get_tuple_query(self, config: RunnableConfig) -> tuple[str, tuple[Any, ...]]:
+    def _build_get_tuple_query(
+        self, config: RunnableConfig
+    ) -> tuple[str, tuple[Any, ...]]:
         """Build the optimized CTE get_tuple query and params."""
         thread_id = config["configurable"]["thread_id"]
         checkpoint_id = get_checkpoint_id(config)
         checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
         if checkpoint_id:
-            args = (thread_id, checkpoint_ns, checkpoint_id)
+            args: tuple[Any, ...] = (thread_id, checkpoint_ns, checkpoint_id)
             where = "WHERE c.thread_id = %s AND c.checkpoint_ns = %s AND c.checkpoint_id = %s"
             order_limit = "ORDER BY c.checkpoint_id DESC"
         else:
@@ -466,7 +468,8 @@ class BasePostgresSaver(BaseCheckpointSaver[str]):
             where_final=where,
             order_limit=order_limit,
         )
-        # Params appear 3x: where_checkpoint, where_pending (first 2), where_final.
+        # Params appear 3x: where_checkpoint, where_pending (first 1-2), where_final.
         args_list = list(args)
-        params = tuple(args_list + args_list[:2] + args_list)
+        n_pending = 2 if config["configurable"].get("checkpoint_ns") is not None else 1
+        params = tuple(args_list + args_list[:n_pending] + args_list)
         return query, params
