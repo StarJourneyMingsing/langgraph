@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import statistics
 import time
 from collections.abc import Sequence
@@ -16,6 +17,10 @@ from psycopg.types.json import Jsonb
 from langgraph.checkpoint.postgres import PostgresSaver
 
 DEFAULT_ADMIN_URI = "postgres://postgres:postgres@localhost:5441/"
+BENCH_ANALYZE_ENV_VAR = "BENCH_ANALYZE"
+
+_TRUE_VALUES = {"1", "true", "yes", "on"}
+_FALSE_VALUES = {"0", "false", "no", "off"}
 
 
 @dataclass
@@ -26,6 +31,21 @@ class BenchmarkResult:
     p95_ms: float
     min_ms: float
     max_ms: float
+
+
+def _read_bool_env(name: str, *, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in _TRUE_VALUES:
+        return True
+    if normalized in _FALSE_VALUES:
+        return False
+    raise ValueError(
+        f"Invalid value for {name}: {raw!r}. Use one of "
+        f"{sorted(_TRUE_VALUES | _FALSE_VALUES)}."
+    )
 
 
 def _percentile(sorted_values: list[float], percentile: float) -> float:
@@ -266,6 +286,8 @@ def run_benchmark(args: argparse.Namespace) -> int:
         ) as bench_conn:
             saver = PostgresSaver(bench_conn)
             bench_conn.execute("SET jit = off")
+            if args.analyze:
+                bench_conn.execute("ANALYZE")
 
             thread_config: RunnableConfig = {
                 "configurable": {
@@ -366,6 +388,10 @@ def run_benchmark(args: argparse.Namespace) -> int:
             print(
                 f"  list limit={args.limit}, warmup={args.warmup}, repeats={args.repeats}"
             )
+            print(
+                f"  analyze={'on' if args.analyze else 'off'} "
+                f"(from {BENCH_ANALYZE_ENV_VAR} or CLI)"
+            )
             print()
 
             has_regression = False
@@ -399,6 +425,19 @@ def main() -> int:
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--repeats", type=int, default=10)
     parser.add_argument("--require-speedup", action="store_true")
+    try:
+        analyze_default = _read_bool_env(BENCH_ANALYZE_ENV_VAR, default=False)
+    except ValueError as exc:
+        parser.error(str(exc))
+    parser.add_argument(
+        "--analyze",
+        action=argparse.BooleanOptionalAction,
+        default=analyze_default,
+        help=(
+            "Run SQL ANALYZE before benchmark queries. "
+            f"Default is controlled by {BENCH_ANALYZE_ENV_VAR}."
+        ),
+    )
     args = parser.parse_args()
     return run_benchmark(args)
 
