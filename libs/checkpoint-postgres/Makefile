@@ -38,11 +38,13 @@ UV_CACHE_DIR ?= /tmp/.uv-cache
 BENCH_ANALYZE ?= 1
 benchmark:
 	@POSTGRES_VERSION=$(POSTGRES_VERSION) make start-postgres
-	@UV_CACHE_DIR=$(UV_CACHE_DIR) BENCH_ANALYZE=$(BENCH_ANALYZE) uv run python tests/benchmark_postgres_checkpoint.py $(BENCH_ARGS)
-	@EXIT_CODE=$$?; \
-	make stop-postgres; \
-	echo "Finished benchmark on PostgreSQL $(POSTGRES_VERSION); Exit code: $$EXIT_CODE"; \
-	exit $$EXIT_CODE
+	@BENCH_EXIT=0; \
+	UV_CACHE_DIR=$(UV_CACHE_DIR) BENCH_ANALYZE=$(BENCH_ANALYZE) uv run python tests/benchmark_postgres_checkpoint.py $(BENCH_ARGS) || BENCH_EXIT=$$?; \
+	STOP_EXIT=0; \
+	make stop-postgres || STOP_EXIT=$$?; \
+	echo "Finished benchmark on PostgreSQL $(POSTGRES_VERSION); Benchmark exit: $$BENCH_EXIT, stop-postgres exit: $$STOP_EXIT"; \
+	if [ $$BENCH_EXIT -ne 0 ]; then exit $$BENCH_EXIT; fi; \
+	exit $$STOP_EXIT
 
 TEST ?= .
 test_watch:
