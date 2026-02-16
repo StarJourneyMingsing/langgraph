@@ -1,4 +1,4 @@
-.PHONY: test test_watch lint format
+.PHONY: test test_watch lint format benchmark
 
 ######################
 # TESTING AND COVERAGE
@@ -32,6 +32,16 @@ test:
 		fi; \
 	done
 	@echo "All PostgreSQL versions tested successfully"
+
+BENCH_ARGS ?=
+UV_CACHE_DIR ?= /tmp/.uv-cache
+benchmark:
+	@POSTGRES_VERSION=$(POSTGRES_VERSION) make start-postgres
+	@UV_CACHE_DIR=$(UV_CACHE_DIR) uv run python tests/benchmark_postgres_checkpoint.py $(BENCH_ARGS)
+	@EXIT_CODE=$$?; \
+	make stop-postgres; \
+	echo "Finished benchmark on PostgreSQL $(POSTGRES_VERSION); Exit code: $$EXIT_CODE"; \
+	exit $$EXIT_CODE
 
 TEST ?= .
 test_watch:
