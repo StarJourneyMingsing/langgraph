@@ -426,7 +426,7 @@ def main() -> int:
     parser.add_argument("--repeats", type=int, default=10)
     parser.add_argument("--require-speedup", action="store_true")
     try:
-        analyze_default = _read_bool_env(BENCH_ANALYZE_ENV_VAR, default=False)
+        analyze_default = _read_bool_env(BENCH_ANALYZE_ENV_VAR, default=True)
     except ValueError as exc:
         parser.error(str(exc))
     parser.add_argument(

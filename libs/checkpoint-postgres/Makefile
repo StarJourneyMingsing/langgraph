@@ -35,7 +35,7 @@ test:
 
 BENCH_ARGS ?=
 UV_CACHE_DIR ?= /tmp/.uv-cache
-BENCH_ANALYZE ?= 0
+BENCH_ANALYZE ?= 1
 benchmark:
 	@POSTGRES_VERSION=$(POSTGRES_VERSION) make start-postgres
 	@UV_CACHE_DIR=$(UV_CACHE_DIR) BENCH_ANALYZE=$(BENCH_ANALYZE) uv run python tests/benchmark_postgres_checkpoint.py $(BENCH_ARGS)
