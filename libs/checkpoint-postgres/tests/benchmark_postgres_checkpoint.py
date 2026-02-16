@@ -108,16 +108,6 @@ def _build_main_list_query(
     return query, [*args, limit]
 
 
-def _build_main_get_latest_query(config: RunnableConfig) -> tuple[str, tuple[str, str]]:
-    thread_id = config["configurable"]["thread_id"]
-    checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
-    query = (
-        "WHERE thread_id = %s AND checkpoint_ns = %s "
-        "ORDER BY checkpoint_id DESC LIMIT 1"
-    )
-    return PostgresSaver.SELECT_SQL + query, (thread_id, checkpoint_ns)
-
-
 def _insert_in_chunks(
     conn: Connection[DictRow],
     query: str,
@@ -311,11 +301,6 @@ def run_benchmark(args: argparse.Namespace) -> int:
                 None, metadata_filter, None, args.limit
             )
 
-            main_get_query, main_get_params = _build_main_get_latest_query(
-                thread_config
-            )
-            new_get_query, new_get_params = saver._build_get_tuple_query(thread_config)
-
             results = [
                 (
                     _benchmark_query(
@@ -355,26 +340,6 @@ def run_benchmark(args: argparse.Namespace) -> int:
                         repeats=args.repeats,
                         warmup=args.warmup,
                         fetch_one=False,
-                    ),
-                ),
-                (
-                    _benchmark_query(
-                        bench_conn,
-                        "get_latest_main",
-                        main_get_query,
-                        main_get_params,
-                        repeats=args.repeats,
-                        warmup=args.warmup,
-                        fetch_one=True,
-                    ),
-                    _benchmark_query(
-                        bench_conn,
-                        "get_latest_new",
-                        new_get_query,
-                        new_get_params,
-                        repeats=args.repeats,
-                        warmup=args.warmup,
-                        fetch_one=True,
                     ),
                 ),
             ]
