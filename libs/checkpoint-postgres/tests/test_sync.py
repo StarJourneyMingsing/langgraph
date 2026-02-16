@@ -221,6 +221,41 @@ def test_get_tuple_without_checkpoint_ns(saver_name: str, test_data) -> None:
         assert checkpoint.config["configurable"]["checkpoint_ns"] == ""
 
 
+def test_query_routing_heuristics() -> None:
+    with _base_saver() as saver:
+        list_query_small, _ = saver._build_list_query(None, None, None, 5)
+        assert list_query_small.lstrip().startswith(saver.SELECT_SQL.lstrip())
+
+        list_query_large, _ = saver._build_list_query(None, None, None, 6)
+        assert list_query_large.lstrip().startswith("WITH base AS")
+
+        list_query_unbounded_wide, _ = saver._build_list_query(None, None, None, None)
+        assert list_query_unbounded_wide.lstrip().startswith("WITH base AS")
+
+        list_query_unbounded_narrow, _ = saver._build_list_query(
+            {"configurable": {"thread_id": "thread-2", "checkpoint_ns": ""}},
+            None,
+            None,
+            None,
+        )
+        assert list_query_unbounded_narrow.lstrip().startswith(
+            saver.SELECT_SQL.lstrip()
+        )
+
+        list_query_limited_narrow, _ = saver._build_list_query(
+            {"configurable": {"thread_id": "thread-2", "checkpoint_ns": ""}},
+            None,
+            None,
+            200,
+        )
+        assert list_query_limited_narrow.lstrip().startswith(saver.SELECT_SQL.lstrip())
+
+        get_query, _ = saver._build_get_tuple_query(
+            {"configurable": {"thread_id": "thread-2", "checkpoint_ns": ""}}
+        )
+        assert get_query.lstrip().startswith(saver.SELECT_SQL.lstrip())
+
+
 @pytest.mark.parametrize("saver_name", ["base", "pool", "pipe", "shallow"])
 def test_search(saver_name: str, test_data) -> None:
     with _saver(saver_name) as saver:

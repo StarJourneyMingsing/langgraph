@@ -13,6 +13,7 @@ from langgraph.checkpoint.base import (
     Checkpoint,
     CheckpointMetadata,
     CheckpointTuple,
+    get_checkpoint_id,
     get_serializable_checkpoint_metadata,
 )
 from langgraph.checkpoint.serde.base import SerializerProtocol
@@ -178,10 +179,18 @@ class AsyncPostgresSaver(BasePostgresSaver):
             The retrieved checkpoint tuple, or None if no matching checkpoint was found.
         """
         thread_id = config["configurable"]["thread_id"]
-        query, args = self._build_get_tuple_query(config)
+        checkpoint_id = get_checkpoint_id(config)
+        checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
+        if checkpoint_id:
+            args: tuple[Any, ...] = (thread_id, checkpoint_ns, checkpoint_id)
+            where = "WHERE thread_id = %s AND checkpoint_ns = %s AND checkpoint_id = %s"
+        else:
+            args = (thread_id, checkpoint_ns)
+            where = "WHERE thread_id = %s AND checkpoint_ns = %s ORDER BY checkpoint_id DESC LIMIT 1"
+
         async with self._cursor() as cur:
             await cur.execute(
-                query,
+                self.SELECT_SQL + where,
                 args,
                 binary=True,
             )

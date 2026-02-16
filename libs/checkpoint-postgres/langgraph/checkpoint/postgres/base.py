@@ -112,25 +112,37 @@ select
     ) as pending_writes
 from checkpoints """
 
-# Optimized list/get query using CTEs to avoid correlated subqueries per row.
-# Same result as SELECT_SQL but fetches channel_values and pending_writes via
-# bulk JOINs instead of one subquery per checkpoint row.
+# Optimized list query using two-phase CTEs.
+# Phase 1 narrows/limits checkpoints first, phase 2 computes channel_values and
+# pending_writes only for that reduced checkpoint set.
 SELECT_LIST_CTE_SQL = """
-WITH checkpoint_data AS (
+WITH base AS (
   SELECT
     c.thread_id,
     c.checkpoint,
     c.checkpoint_ns,
     c.checkpoint_id,
     c.parent_checkpoint_id,
-    c.metadata,
+    c.metadata
+  FROM checkpoints c
+  {where_base}
+  ORDER BY c.checkpoint_id DESC
+  {limit_clause}
+),
+checkpoint_data AS (
+  SELECT
+    b.thread_id,
+    b.checkpoint,
+    b.checkpoint_ns,
+    b.checkpoint_id,
+    b.parent_checkpoint_id,
+    b.metadata,
     kv.key AS channel_key,
     kv.value AS channel_version
-  FROM checkpoints c
+  FROM base b
   LEFT JOIN LATERAL jsonb_each_text(
-    COALESCE(c.checkpoint -> 'channel_versions', '{{}}'::jsonb)
+    COALESCE(b.checkpoint -> 'channel_versions', '{{}}'::jsonb)
   ) AS kv ON true
-  {where_checkpoint}
 ),
 channel_values AS (
   SELECT
@@ -156,29 +168,31 @@ pending_writes AS (
       ORDER BY cw.task_id, cw.idx
     ) AS pending_write
   FROM checkpoint_writes cw
-  WHERE {where_pending}
+  INNER JOIN base b
+  ON cw.thread_id = b.thread_id
+    AND cw.checkpoint_ns = b.checkpoint_ns
+    AND cw.checkpoint_id = b.checkpoint_id
   GROUP BY cw.thread_id, cw.checkpoint_ns, cw.checkpoint_id
 )
 SELECT
-  c.thread_id,
-  c.checkpoint,
-  c.checkpoint_ns,
-  c.checkpoint_id,
-  c.parent_checkpoint_id,
-  c.metadata,
+  b.thread_id,
+  b.checkpoint,
+  b.checkpoint_ns,
+  b.checkpoint_id,
+  b.parent_checkpoint_id,
+  b.metadata,
   cv.channel_value AS channel_values,
   pw.pending_write AS pending_writes
-FROM checkpoints c
+FROM base b
 LEFT JOIN channel_values cv
-ON c.thread_id = cv.thread_id
-  AND c.checkpoint_id = cv.checkpoint_id
-  AND c.checkpoint_ns = cv.checkpoint_ns
+ON b.thread_id = cv.thread_id
+  AND b.checkpoint_id = cv.checkpoint_id
+  AND b.checkpoint_ns = cv.checkpoint_ns
 LEFT JOIN pending_writes pw
-ON c.thread_id = pw.thread_id
-  AND c.checkpoint_id = pw.checkpoint_id
-  AND c.checkpoint_ns = pw.checkpoint_ns
-{where_final}
-{order_limit}
+ON b.thread_id = pw.thread_id
+  AND b.checkpoint_id = pw.checkpoint_id
+  AND b.checkpoint_ns = pw.checkpoint_ns
+ORDER BY b.checkpoint_id DESC
 """
 
 SELECT_PENDING_SENDS_SQL = f"""
@@ -235,26 +249,12 @@ def _qualify_where(where: str, alias: str = "c") -> str:
     return where
 
 
-def _pending_writes_where(config: RunnableConfig | None) -> str:
-    """Return WHERE predicate for pending_writes CTE (no WHERE keyword).
-
-    Uses same %s placeholders as _search_where's first 1–2 params (thread_id, checkpoint_ns).
-    """
-    if not config:
-        return "TRUE"
-    tid = config["configurable"].get("thread_id")
-    if tid is None:
-        return "TRUE"
-    ns = config["configurable"].get("checkpoint_ns")
-    if ns is not None:
-        return "cw.thread_id = %s AND cw.checkpoint_ns = %s"
-    return "cw.thread_id = %s"
-
-
 class BasePostgresSaver(BaseCheckpointSaver[str]):
     SELECT_SQL = SELECT_SQL
     SELECT_LIST_CTE_SQL = SELECT_LIST_CTE_SQL
     SELECT_PENDING_SENDS_SQL = SELECT_PENDING_SENDS_SQL
+    LIST_CTE_LIMIT_THRESHOLD = 5
+    NARROW_LIST_CTE_LIMIT_THRESHOLD = 500
     MIGRATIONS = MIGRATIONS
     UPSERT_CHECKPOINT_BLOBS_SQL = UPSERT_CHECKPOINT_BLOBS_SQL
     UPSERT_CHECKPOINTS_SQL = UPSERT_CHECKPOINTS_SQL
@@ -420,56 +420,104 @@ class BasePostgresSaver(BaseCheckpointSaver[str]):
         before: RunnableConfig | None,
         limit: int | None,
     ) -> tuple[str, list[Any]]:
-        """Build the optimized CTE list query and params."""
+        """Build a list query and params using legacy or CTE strategy."""
+        if not self._use_cte_for_list(config, filter, before, limit):
+            where, args = self._search_where(config, filter, before)
+            query = self.SELECT_SQL + where + " ORDER BY checkpoint_id DESC"
+            params = list(args)
+            if limit is not None:
+                query += " LIMIT %s"
+                params.append(int(limit))
+            return query, params
+
         where, args = self._search_where(config, filter, before)
-        where_qualified = _qualify_where(where)
-        pending_where = _pending_writes_where(config)
-        order_limit = "ORDER BY c.checkpoint_id DESC"
-        if limit is not None:
-            order_limit += " LIMIT %s"
+        where_base = _qualify_where(where, alias="c")
+        limit_clause = "LIMIT %s" if limit is not None else ""
         query = self.SELECT_LIST_CTE_SQL.format(
-            where_checkpoint=where_qualified,
-            where_pending=pending_where,
-            where_final=where_qualified,
-            order_limit=order_limit,
+            where_base=where_base,
+            limit_clause=limit_clause,
         )
-        # Params appear 3x in the query: where_checkpoint, where_pending, where_final.
-        # where_pending uses only the first 0–2 args (thread_id, optional checkpoint_ns).
-        args_list = list(args)
-        n_pending = (
-            0
-            if not config or config["configurable"].get("thread_id") is None
-            else (2 if config["configurable"].get("checkpoint_ns") is not None else 1)
-        )
-        params = args_list + args_list[:n_pending] + args_list
+        params = list(args)
         if limit is not None:
             params.append(int(limit))
         return query, params
 
+    def _use_cte_for_list(
+        self,
+        config: RunnableConfig | None,
+        filter: MetadataInput,
+        before: RunnableConfig | None,
+        limit: int | None,
+    ) -> bool:
+        """Choose CTE strategy for broader list queries.
+
+        Heuristic:
+        - Use legacy query for very small pages (limit <= LIST_CTE_LIMIT_THRESHOLD).
+        - Use CTE query for larger pages (limit > LIST_CTE_LIMIT_THRESHOLD).
+        - For unbounded scans (limit is None), use CTE only when filters are broad.
+        """
+        if self._is_narrow_list_filter(config, filter, before):
+            if limit is None:
+                return False
+            return limit > self.NARROW_LIST_CTE_LIMIT_THRESHOLD
+
+        if limit is not None:
+            return limit > self.LIST_CTE_LIMIT_THRESHOLD
+        return self._is_wide_list_filter(config, filter, before)
+
+    def _is_narrow_list_filter(
+        self,
+        config: RunnableConfig | None,
+        filter: MetadataInput,
+        before: RunnableConfig | None,
+    ) -> bool:
+        """Return whether list filter is constrained to a single thread+namespace."""
+        if config is None or filter or before is not None:
+            return False
+        configurable = config.get("configurable", {})
+        if configurable.get("thread_id") is None:
+            return False
+        if configurable.get("checkpoint_ns") is None:
+            return False
+        if get_checkpoint_id(config):
+            return False
+        return True
+
+    def _is_wide_list_filter(
+        self,
+        config: RunnableConfig | None,
+        filter: MetadataInput,
+        before: RunnableConfig | None,
+    ) -> bool:
+        """Return whether list filters are broad enough to favor CTE reads."""
+        if config is None:
+            return True
+
+        configurable = config.get("configurable", {})
+        if configurable.get("thread_id") is None:
+            return True
+        if configurable.get("checkpoint_ns") is None:
+            return True
+        if get_checkpoint_id(config):
+            return False
+        if filter:
+            return False
+        if before is not None:
+            return False
+        return False
+
     def _build_get_tuple_query(
         self, config: RunnableConfig
     ) -> tuple[str, tuple[Any, ...]]:
-        """Build the optimized CTE get_tuple query and params."""
+        """Build the lightweight get_tuple query and params."""
         thread_id = config["configurable"]["thread_id"]
         checkpoint_id = get_checkpoint_id(config)
         checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
         if checkpoint_id:
             args: tuple[Any, ...] = (thread_id, checkpoint_ns, checkpoint_id)
-            where = "WHERE c.thread_id = %s AND c.checkpoint_ns = %s AND c.checkpoint_id = %s"
-            order_limit = "ORDER BY c.checkpoint_id DESC"
+            where = "WHERE thread_id = %s AND checkpoint_ns = %s AND checkpoint_id = %s"
         else:
             args = (thread_id, checkpoint_ns)
-            where = "WHERE c.thread_id = %s AND c.checkpoint_ns = %s"
-            order_limit = "ORDER BY c.checkpoint_id DESC LIMIT 1"
-        pending_where = _pending_writes_where(config)
-        query = self.SELECT_LIST_CTE_SQL.format(
-            where_checkpoint=where,
-            where_pending=pending_where,
-            where_final=where,
-            order_limit=order_limit,
-        )
-        # Params appear 3x: where_checkpoint, where_pending (first 1-2), where_final.
-        args_list = list(args)
-        n_pending = 2 if config["configurable"].get("checkpoint_ns") is not None else 1
-        params = tuple(args_list + args_list[:n_pending] + args_list)
-        return query, params
+            where = "WHERE thread_id = %s AND checkpoint_ns = %s ORDER BY checkpoint_id DESC LIMIT 1"
+
+        return self.SELECT_SQL + where, args
