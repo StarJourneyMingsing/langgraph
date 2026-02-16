@@ -224,7 +224,11 @@ class BasePostgresSaver(BaseCheckpointSaver[str]):
     SELECT_LIST_CTE_SQL = SELECT_LIST_CTE_SQL
     SELECT_PENDING_SENDS_SQL = SELECT_PENDING_SENDS_SQL
     LIST_CTE_LIMIT_THRESHOLD = 5
-    THREAD_FILTERED_LIST_CTE_LIMIT_THRESHOLD = 200
+    # Thread-scoped + metadata filters are typically cheap with legacy SQL;
+    # keep CTE for very large pages only.
+    THREAD_FILTERED_LIST_CTE_LIMIT_THRESHOLD = 5000
+    # Broad metadata-only scans can benefit from CTE at larger page sizes.
+    METADATA_ONLY_LIST_CTE_LIMIT_THRESHOLD = 5000
     NARROW_LIST_CTE_LIMIT_THRESHOLD = 500
     MIGRATIONS = MIGRATIONS
     UPSERT_CHECKPOINT_BLOBS_SQL = UPSERT_CHECKPOINT_BLOBS_SQL
@@ -425,6 +429,7 @@ class BasePostgresSaver(BaseCheckpointSaver[str]):
         Heuristic:
         - Use legacy query for very small pages (limit <= LIST_CTE_LIMIT_THRESHOLD).
         - For thread+namespace scoped filters, use a higher limit threshold.
+        - For metadata-only wide scans, use CTE only above a larger threshold.
         - Use CTE query for larger pages (limit > LIST_CTE_LIMIT_THRESHOLD).
         - For unbounded scans (limit is None), use CTE only when filters are broad.
         """
@@ -434,9 +439,16 @@ class BasePostgresSaver(BaseCheckpointSaver[str]):
             return limit > self.NARROW_LIST_CTE_LIMIT_THRESHOLD
 
         if self._is_thread_ns_list_filter(config):
+            if before is not None:
+                return False
             if limit is None:
                 return False
             return limit > self.THREAD_FILTERED_LIST_CTE_LIMIT_THRESHOLD
+
+        if self._is_metadata_only_wide_filter(config, filter, before):
+            if limit is None:
+                return True
+            return limit > self.METADATA_ONLY_LIST_CTE_LIMIT_THRESHOLD
 
         if limit is not None:
             return limit > self.LIST_CTE_LIMIT_THRESHOLD
@@ -472,6 +484,15 @@ class BasePostgresSaver(BaseCheckpointSaver[str]):
         if get_checkpoint_id(config):
             return False
         return True
+
+    def _is_metadata_only_wide_filter(
+        self,
+        config: RunnableConfig | None,
+        filter: MetadataInput,
+        before: RunnableConfig | None,
+    ) -> bool:
+        """Return whether list filter is metadata-only across all threads."""
+        return config is None and bool(filter) and before is None
 
     def _is_wide_list_filter(
         self,

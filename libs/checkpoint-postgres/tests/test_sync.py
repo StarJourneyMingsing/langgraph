@@ -270,6 +270,24 @@ def test_query_routing_heuristics() -> None:
         )
         assert list_query_thread_filtered_large.lstrip().startswith("WITH base AS")
 
+        list_query_metadata_only_small, _ = saver._build_list_query(
+            None,
+            {"source": "input"},
+            None,
+            saver.METADATA_ONLY_LIST_CTE_LIMIT_THRESHOLD,
+        )
+        assert list_query_metadata_only_small.lstrip().startswith(
+            saver.SELECT_SQL.lstrip()
+        )
+
+        list_query_metadata_only_large, _ = saver._build_list_query(
+            None,
+            {"source": "input"},
+            None,
+            saver.METADATA_ONLY_LIST_CTE_LIMIT_THRESHOLD + 1,
+        )
+        assert list_query_metadata_only_large.lstrip().startswith("WITH base AS")
+
         get_query, _ = saver._build_get_tuple_query(thread_config)
         assert get_query.lstrip().startswith(saver.SELECT_SQL.lstrip())
 
