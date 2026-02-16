@@ -18,6 +18,7 @@ from langgraph.checkpoint.postgres import PostgresSaver
 
 DEFAULT_ADMIN_URI = "postgres://postgres:postgres@localhost:5441/"
 BENCH_ANALYZE_ENV_VAR = "BENCH_ANALYZE"
+PLAN_CACHE_MODES = ("auto", "force_custom_plan", "force_generic_plan")
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"0", "false", "no", "off"}
@@ -288,6 +289,13 @@ def run_benchmark(args: argparse.Namespace) -> int:
         ) as bench_conn:
             saver = PostgresSaver(bench_conn)
             bench_conn.execute("SET jit = off")
+            if args.plan_cache_mode != "auto":
+                bench_conn.execute(f"SET plan_cache_mode = '{args.plan_cache_mode}'")
+            if args.max_parallel_workers_per_gather is not None:
+                bench_conn.execute(
+                    "SET max_parallel_workers_per_gather = "
+                    f"{args.max_parallel_workers_per_gather}"
+                )
             if args.analyze:
                 bench_conn.execute("ANALYZE")
 
@@ -369,6 +377,12 @@ def run_benchmark(args: argparse.Namespace) -> int:
                 f"  analyze={'on' if args.analyze else 'off'} "
                 f"(from {BENCH_ANALYZE_ENV_VAR} or CLI)"
             )
+            print(f"  plan-cache-mode={args.plan_cache_mode}")
+            if args.max_parallel_workers_per_gather is not None:
+                print(
+                    "  max-parallel-workers-per-gather="
+                    f"{args.max_parallel_workers_per_gather}"
+                )
             print(f"  print-samples={'on' if args.print_samples else 'off'}")
             print()
 
@@ -412,6 +426,21 @@ def main() -> int:
         help="Print per-repeat latency samples for each benchmark scenario.",
     )
     parser.add_argument("--require-speedup", action="store_true")
+    parser.add_argument(
+        "--plan-cache-mode",
+        choices=PLAN_CACHE_MODES,
+        default="auto",
+        help=(
+            "Set plan_cache_mode for the benchmark session. "
+            "Use force_custom_plan to reduce generic-plan variance."
+        ),
+    )
+    parser.add_argument(
+        "--max-parallel-workers-per-gather",
+        type=int,
+        default=None,
+        help="Set max_parallel_workers_per_gather for the benchmark session.",
+    )
     try:
         analyze_default = _read_bool_env(BENCH_ANALYZE_ENV_VAR, default=True)
     except ValueError as exc:

@@ -128,51 +128,6 @@ WITH base AS (
   {where_base}
   ORDER BY c.checkpoint_id DESC
   {limit_clause}
-),
-checkpoint_data AS (
-  SELECT
-    b.thread_id,
-    b.checkpoint,
-    b.checkpoint_ns,
-    b.checkpoint_id,
-    b.parent_checkpoint_id,
-    b.metadata,
-    kv.key AS channel_key,
-    kv.value AS channel_version
-  FROM base b
-  LEFT JOIN LATERAL jsonb_each_text(
-    COALESCE(b.checkpoint -> 'channel_versions', '{{}}'::jsonb)
-  ) AS kv ON true
-),
-channel_values AS (
-  SELECT
-    cd.thread_id,
-    cd.checkpoint_id,
-    cd.checkpoint_ns,
-    array_agg(array[bl.channel::bytea, bl.type::bytea, bl.blob]) AS channel_value
-  FROM checkpoint_data cd
-  INNER JOIN checkpoint_blobs bl
-  ON bl.thread_id = cd.thread_id
-    AND bl.checkpoint_ns = cd.checkpoint_ns
-    AND bl.channel = cd.channel_key
-    AND bl.version = cd.channel_version
-  GROUP BY cd.thread_id, cd.checkpoint_id, cd.checkpoint_ns
-),
-pending_writes AS (
-  SELECT
-    cw.thread_id,
-    cw.checkpoint_ns,
-    cw.checkpoint_id,
-    array_agg(
-      array[cw.task_id::text::bytea, cw.channel::bytea, cw.type::bytea, cw.blob]
-      ORDER BY cw.task_id, cw.idx
-    ) AS pending_write
-  FROM checkpoint_writes cw
-  INNER JOIN base b
-  ON cw.thread_id = b.thread_id
-    AND cw.checkpoint_ns = b.checkpoint_ns
-    AND cw.checkpoint_id = b.checkpoint_id
-  GROUP BY cw.thread_id, cw.checkpoint_ns, cw.checkpoint_id
 )
 SELECT
   b.thread_id,
@@ -181,17 +136,32 @@ SELECT
   b.checkpoint_id,
   b.parent_checkpoint_id,
   b.metadata,
-  cv.channel_value AS channel_values,
-  pw.pending_write AS pending_writes
+  cv.channel_values,
+  pw.pending_writes
 FROM base b
-LEFT JOIN channel_values cv
-ON b.thread_id = cv.thread_id
-  AND b.checkpoint_id = cv.checkpoint_id
-  AND b.checkpoint_ns = cv.checkpoint_ns
-LEFT JOIN pending_writes pw
-ON b.thread_id = pw.thread_id
-  AND b.checkpoint_id = pw.checkpoint_id
-  AND b.checkpoint_ns = pw.checkpoint_ns
+LEFT JOIN LATERAL (
+  SELECT
+    array_agg(array[bl.channel::bytea, bl.type::bytea, bl.blob]) AS channel_values
+  FROM jsonb_each_text(
+    COALESCE(b.checkpoint -> 'channel_versions', '{{}}'::jsonb)
+  ) AS kv
+  INNER JOIN checkpoint_blobs bl
+  ON bl.thread_id = b.thread_id
+    AND bl.checkpoint_ns = b.checkpoint_ns
+    AND bl.channel = kv.key
+    AND bl.version = kv.value
+) cv ON true
+LEFT JOIN LATERAL (
+  SELECT
+    array_agg(
+      array[cw.task_id::text::bytea, cw.channel::bytea, cw.type::bytea, cw.blob]
+      ORDER BY cw.task_id, cw.idx
+    ) AS pending_writes
+  FROM checkpoint_writes cw
+  WHERE cw.thread_id = b.thread_id
+    AND cw.checkpoint_ns = b.checkpoint_ns
+    AND cw.checkpoint_id = b.checkpoint_id
+) pw ON true
 ORDER BY b.checkpoint_id DESC
 """
 
