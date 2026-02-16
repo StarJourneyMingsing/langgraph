@@ -254,6 +254,7 @@ class BasePostgresSaver(BaseCheckpointSaver[str]):
     SELECT_LIST_CTE_SQL = SELECT_LIST_CTE_SQL
     SELECT_PENDING_SENDS_SQL = SELECT_PENDING_SENDS_SQL
     LIST_CTE_LIMIT_THRESHOLD = 5
+    THREAD_FILTERED_LIST_CTE_LIMIT_THRESHOLD = 200
     NARROW_LIST_CTE_LIMIT_THRESHOLD = 500
     MIGRATIONS = MIGRATIONS
     UPSERT_CHECKPOINT_BLOBS_SQL = UPSERT_CHECKPOINT_BLOBS_SQL
@@ -453,6 +454,7 @@ class BasePostgresSaver(BaseCheckpointSaver[str]):
 
         Heuristic:
         - Use legacy query for very small pages (limit <= LIST_CTE_LIMIT_THRESHOLD).
+        - For thread+namespace scoped filters, use a higher limit threshold.
         - Use CTE query for larger pages (limit > LIST_CTE_LIMIT_THRESHOLD).
         - For unbounded scans (limit is None), use CTE only when filters are broad.
         """
@@ -460,6 +462,11 @@ class BasePostgresSaver(BaseCheckpointSaver[str]):
             if limit is None:
                 return False
             return limit > self.NARROW_LIST_CTE_LIMIT_THRESHOLD
+
+        if self._is_thread_ns_list_filter(config):
+            if limit is None:
+                return False
+            return limit > self.THREAD_FILTERED_LIST_CTE_LIMIT_THRESHOLD
 
         if limit is not None:
             return limit > self.LIST_CTE_LIMIT_THRESHOLD
@@ -473,6 +480,19 @@ class BasePostgresSaver(BaseCheckpointSaver[str]):
     ) -> bool:
         """Return whether list filter is constrained to a single thread+namespace."""
         if config is None or filter or before is not None:
+            return False
+        configurable = config.get("configurable", {})
+        if configurable.get("thread_id") is None:
+            return False
+        if configurable.get("checkpoint_ns") is None:
+            return False
+        if get_checkpoint_id(config):
+            return False
+        return True
+
+    def _is_thread_ns_list_filter(self, config: RunnableConfig | None) -> bool:
+        """Return whether list filter is constrained to a thread+namespace."""
+        if config is None:
             return False
         configurable = config.get("configurable", {})
         if configurable.get("thread_id") is None:

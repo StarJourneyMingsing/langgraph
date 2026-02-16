@@ -223,6 +223,8 @@ def test_get_tuple_without_checkpoint_ns(saver_name: str, test_data) -> None:
 
 def test_query_routing_heuristics() -> None:
     with _base_saver() as saver:
+        thread_config = {"configurable": {"thread_id": "thread-2", "checkpoint_ns": ""}}
+
         list_query_small, _ = saver._build_list_query(None, None, None, 5)
         assert list_query_small.lstrip().startswith(saver.SELECT_SQL.lstrip())
 
@@ -233,7 +235,7 @@ def test_query_routing_heuristics() -> None:
         assert list_query_unbounded_wide.lstrip().startswith("WITH base AS")
 
         list_query_unbounded_narrow, _ = saver._build_list_query(
-            {"configurable": {"thread_id": "thread-2", "checkpoint_ns": ""}},
+            thread_config,
             None,
             None,
             None,
@@ -243,16 +245,32 @@ def test_query_routing_heuristics() -> None:
         )
 
         list_query_limited_narrow, _ = saver._build_list_query(
-            {"configurable": {"thread_id": "thread-2", "checkpoint_ns": ""}},
+            thread_config,
             None,
             None,
             200,
         )
         assert list_query_limited_narrow.lstrip().startswith(saver.SELECT_SQL.lstrip())
 
-        get_query, _ = saver._build_get_tuple_query(
-            {"configurable": {"thread_id": "thread-2", "checkpoint_ns": ""}}
+        list_query_thread_filtered_small, _ = saver._build_list_query(
+            thread_config,
+            {"source": "input"},
+            None,
+            saver.THREAD_FILTERED_LIST_CTE_LIMIT_THRESHOLD,
         )
+        assert list_query_thread_filtered_small.lstrip().startswith(
+            saver.SELECT_SQL.lstrip()
+        )
+
+        list_query_thread_filtered_large, _ = saver._build_list_query(
+            thread_config,
+            {"source": "input"},
+            None,
+            saver.THREAD_FILTERED_LIST_CTE_LIMIT_THRESHOLD + 1,
+        )
+        assert list_query_thread_filtered_large.lstrip().startswith("WITH base AS")
+
+        get_query, _ = saver._build_get_tuple_query(thread_config)
         assert get_query.lstrip().startswith(saver.SELECT_SQL.lstrip())
 
 

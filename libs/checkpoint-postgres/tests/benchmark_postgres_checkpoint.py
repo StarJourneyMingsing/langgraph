@@ -31,6 +31,7 @@ class BenchmarkResult:
     p95_ms: float
     min_ms: float
     max_ms: float
+    samples_ms: list[float]
 
 
 def _read_bool_env(name: str, *, default: bool = False) -> bool:
@@ -94,6 +95,7 @@ def _benchmark_query(
         p95_ms=_percentile(sorted_timings, 0.95),
         min_ms=min(timings_ms),
         max_ms=max(timings_ms),
+        samples_ms=timings_ms,
     )
 
 
@@ -221,8 +223,15 @@ def _seed_dataset(
     return target_thread, target_ns
 
 
+def _format_samples(samples: Sequence[float]) -> str:
+    return ", ".join(f"{value:.3f}" for value in samples)
+
+
 def _print_result(
-    main_result: BenchmarkResult, optimized_result: BenchmarkResult
+    main_result: BenchmarkResult,
+    optimized_result: BenchmarkResult,
+    *,
+    print_samples: bool,
 ) -> None:
     speedup = main_result.median_ms / optimized_result.median_ms
     improvement = (speedup - 1.0) * 100
@@ -236,6 +245,9 @@ def _print_result(
         f"{optimized_result.median_ms:.3f} ms (mean {optimized_result.mean_ms:.3f}, p95 {optimized_result.p95_ms:.3f})"
     )
     print(f"  speedup: {speedup:.2f}x ({improvement:+.1f}%)")
+    if print_samples:
+        print(f"  main samples(ms): {_format_samples(main_result.samples_ms)}")
+        print(f"  new  samples(ms): {_format_samples(optimized_result.samples_ms)}")
     print()
 
 
@@ -357,11 +369,16 @@ def run_benchmark(args: argparse.Namespace) -> int:
                 f"  analyze={'on' if args.analyze else 'off'} "
                 f"(from {BENCH_ANALYZE_ENV_VAR} or CLI)"
             )
+            print(f"  print-samples={'on' if args.print_samples else 'off'}")
             print()
 
             has_regression = False
             for main_result, optimized_result in results:
-                _print_result(main_result, optimized_result)
+                _print_result(
+                    main_result,
+                    optimized_result,
+                    print_samples=args.print_samples,
+                )
                 if optimized_result.median_ms >= main_result.median_ms:
                     has_regression = True
 
@@ -389,6 +406,11 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=200)
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--repeats", type=int, default=10)
+    parser.add_argument(
+        "--print-samples",
+        action="store_true",
+        help="Print per-repeat latency samples for each benchmark scenario.",
+    )
     parser.add_argument("--require-speedup", action="store_true")
     try:
         analyze_default = _read_bool_env(BENCH_ANALYZE_ENV_VAR, default=True)
