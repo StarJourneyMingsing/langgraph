@@ -22,6 +22,7 @@ from langgraph.checkpoint.postgres.aio import (
     AsyncPostgresSaver,
     AsyncShallowPostgresSaver,
 )
+from langgraph.checkpoint.postgres.greenplum import AsyncGreenplumSaver
 from tests.conftest import DEFAULT_POSTGRES_URI
 
 
@@ -140,6 +141,31 @@ async def _shallow_saver():
 
 
 @asynccontextmanager
+async def _greenplum_saver():
+    """Fixture for AsyncGreenplumSaver (CTE-based list query)."""
+    database = f"test_{uuid4().hex[:16]}"
+    async with await AsyncConnection.connect(
+        DEFAULT_POSTGRES_URI, autocommit=True
+    ) as conn:
+        await conn.execute(f"CREATE DATABASE {database}")
+    try:
+        async with await AsyncConnection.connect(
+            DEFAULT_POSTGRES_URI + database,
+            autocommit=True,
+            prepare_threshold=0,
+            row_factory=dict_row,
+        ) as conn:
+            checkpointer = AsyncGreenplumSaver(conn)
+            await checkpointer.setup()
+            yield checkpointer
+    finally:
+        async with await AsyncConnection.connect(
+            DEFAULT_POSTGRES_URI, autocommit=True
+        ) as conn:
+            await conn.execute(f"DROP DATABASE {database}")
+
+
+@asynccontextmanager
 async def _saver(name: str):
     if name == "base":
         async with _base_saver() as saver:
@@ -152,6 +178,9 @@ async def _saver(name: str):
             yield saver
     elif name == "pipe":
         async with _pipe_saver() as saver:
+            yield saver
+    elif name == "greenplum":
+        async with _greenplum_saver() as saver:
             yield saver
 
 
@@ -228,7 +257,7 @@ async def test_combined_metadata(saver_name: str, test_data) -> None:
         }
 
 
-@pytest.mark.parametrize("saver_name", ["base", "pool", "pipe", "shallow"])
+@pytest.mark.parametrize("saver_name", ["base", "pool", "pipe", "shallow", "greenplum"])
 async def test_asearch(saver_name: str, test_data) -> None:
     async with _saver(saver_name) as saver:
         configs = test_data["configs"]
@@ -293,7 +322,7 @@ async def test_null_chars(saver_name: str, test_data) -> None:
         ].metadata["my_key"] == "abc"
 
 
-@pytest.mark.parametrize("saver_name", ["base", "pool", "pipe"])
+@pytest.mark.parametrize("saver_name", ["base", "pool", "pipe", "greenplum"])
 async def test_pending_sends_migration(saver_name: str) -> None:
     async with _saver(saver_name) as saver:
         config = {

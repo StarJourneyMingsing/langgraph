@@ -20,6 +20,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
 from langgraph.checkpoint.postgres import PostgresSaver, ShallowPostgresSaver
+from langgraph.checkpoint.postgres.greenplum import GreenplumSaver
 from tests.conftest import DEFAULT_POSTGRES_URI
 
 
@@ -122,6 +123,27 @@ def _shallow_saver():
 
 
 @contextmanager
+def _greenplum_saver():
+    """Fixture for GreenplumSaver (CTE-based list query)."""
+    database = f"test_{uuid4().hex[:16]}"
+    with Connection.connect(DEFAULT_POSTGRES_URI, autocommit=True) as conn:
+        conn.execute(f"CREATE DATABASE {database}")
+    try:
+        with Connection.connect(
+            DEFAULT_POSTGRES_URI + database,
+            autocommit=True,
+            prepare_threshold=0,
+            row_factory=dict_row,
+        ) as conn:
+            checkpointer = GreenplumSaver(conn)
+            checkpointer.setup()
+            yield checkpointer
+    finally:
+        with Connection.connect(DEFAULT_POSTGRES_URI, autocommit=True) as conn:
+            conn.execute(f"DROP DATABASE {database}")
+
+
+@contextmanager
 def _saver(name: str):
     if name == "base":
         with _base_saver() as saver:
@@ -134,6 +156,9 @@ def _saver(name: str):
             yield saver
     elif name == "pipe":
         with _pipe_saver() as saver:
+            yield saver
+    elif name == "greenplum":
+        with _greenplum_saver() as saver:
             yield saver
 
 
@@ -210,7 +235,7 @@ def test_combined_metadata(saver_name: str, test_data) -> None:
         }
 
 
-@pytest.mark.parametrize("saver_name", ["base", "pool", "pipe", "shallow"])
+@pytest.mark.parametrize("saver_name", ["base", "pool", "pipe", "shallow", "greenplum"])
 def test_search(saver_name: str, test_data) -> None:
     with _saver(saver_name) as saver:
         configs = test_data["configs"]
@@ -281,7 +306,7 @@ def test_nonnull_migrations() -> None:
         assert statement.strip()
 
 
-@pytest.mark.parametrize("saver_name", ["base", "pool", "pipe"])
+@pytest.mark.parametrize("saver_name", ["base", "pool", "pipe", "greenplum"])
 def test_pending_sends_migration(saver_name: str) -> None:
     with _saver(saver_name) as saver:
         config = {

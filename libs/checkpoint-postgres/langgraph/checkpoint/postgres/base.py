@@ -164,6 +164,21 @@ class BasePostgresSaver(BaseCheckpointSaver[str]):
 
     supports_pipeline: bool
 
+    def _build_list_query(
+        self, where: str, args: list[Any], limit: int | None
+    ) -> tuple[str, list[Any]]:
+        """Build the SQL query for listing checkpoints.
+
+        Subclasses can override this to use alternative query strategies
+        (e.g., CTE-based queries for Greenplum/MPP databases).
+        """
+        query = self.SELECT_SQL + where + " ORDER BY checkpoint_id DESC"
+        params = list(args)
+        if limit is not None:
+            query += " LIMIT %s"
+            params.append(int(limit))
+        return query, params
+
     def _migrate_pending_sends(
         self,
         pending_sends: list[tuple[bytes, bytes]],
